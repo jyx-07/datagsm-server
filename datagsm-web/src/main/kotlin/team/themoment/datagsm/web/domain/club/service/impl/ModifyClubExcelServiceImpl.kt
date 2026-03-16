@@ -10,7 +10,6 @@ import team.themoment.datagsm.common.domain.club.dto.internal.ClubInfoDto
 import team.themoment.datagsm.common.domain.club.entity.ClubJpaEntity
 import team.themoment.datagsm.common.domain.club.entity.constant.ClubType
 import team.themoment.datagsm.common.domain.club.repository.ClubJpaRepository
-import team.themoment.datagsm.common.domain.student.entity.StudentJpaEntity
 import team.themoment.datagsm.common.domain.student.repository.StudentJpaRepository
 import team.themoment.datagsm.web.domain.club.service.ModifyClubExcelService
 import team.themoment.sdk.exception.ExpectedException
@@ -28,6 +27,16 @@ class ModifyClubExcelServiceImpl(
         private const val JOB_CLUB_LEADER_COL_IDX = 3
         private const val AUTONOMOUS_CLUB_COL_IDX = 4
         private const val AUTONOMOUS_CLUB_LEADER_COL_IDX = 5
+    }
+
+    private data class ParsedLeaderInfo(
+        val grade: Int,
+        val classNum: Int,
+        val number: Int,
+        val name: String,
+        val rawStudentNumber: String,
+    ) {
+        val code: Int get() = grade * 1000 + classNum * 100 + number
     }
 
     @Transactional
@@ -55,17 +64,34 @@ class ModifyClubExcelServiceImpl(
             )
         }
 
+        val parsedLeaders = clubInfos.map { parseLeaderInfo(it.leaderInfo) }
+
+        val studentsByCode =
+            studentJpaRepository
+                .findAllByStudentNumberCodes(parsedLeaders.map { it.code })
+                .associateBy { it.studentNumber?.fullStudentNumber }
+
+        val leaderEntities =
+            parsedLeaders.map { parsed ->
+                studentsByCode[parsed.code]
+                    ?.takeIf { it.name == parsed.name }
+                    ?: throw ExpectedException(
+                        "학번 ${parsed.rawStudentNumber} 이름 ${parsed.name} 에 해당하는 학생을 찾을 수 없습니다.",
+                        HttpStatus.NOT_FOUND,
+                    )
+            }
+
         val existingClubs =
             clubJpaRepository
                 .findAllByNameIn(clubInfos.map { it.clubName })
                 .associateBy { it.name }
 
         val clubsToSave =
-            clubInfos.map { dto ->
+            clubInfos.mapIndexed { idx, dto ->
                 (existingClubs[dto.clubName] ?: ClubJpaEntity()).also { club ->
                     club.name = dto.clubName
                     club.type = dto.clubType
-                    club.leader = parseAndFindLeader(dto.leaderInfo)
+                    club.leader = leaderEntities[idx]
                 }
             }
         clubJpaRepository.saveAll(clubsToSave)
@@ -80,7 +106,7 @@ class ModifyClubExcelServiceImpl(
         return CommonApiResponse.success("엑셀 업로드 성공")
     }
 
-    private fun parseAndFindLeader(leaderInfo: String?): StudentJpaEntity {
+    private fun parseLeaderInfo(leaderInfo: String?): ParsedLeaderInfo {
         if (leaderInfo.isNullOrBlank()) {
             throw ExpectedException(
                 "동아리 부장 정보가 비어있습니다.",
@@ -106,19 +132,12 @@ class ModifyClubExcelServiceImpl(
             )
         }
 
-        val grade = studentNumberStr[0].digitToInt()
-        val classNum = studentNumberStr[1].digitToInt()
-        val number = studentNumberStr.substring(2).toInt()
-
-        return studentJpaRepository
-            .findByStudentNumberStudentGradeAndStudentNumberStudentClassAndStudentNumberStudentNumberAndName(
-                grade,
-                classNum,
-                number,
-                studentName,
-            ) ?: throw ExpectedException(
-            "학번 $studentNumberStr 이름 $studentName 에 해당하는 학생을 찾을 수 없습니다.",
-            HttpStatus.NOT_FOUND,
+        return ParsedLeaderInfo(
+            grade = studentNumberStr[0].digitToInt(),
+            classNum = studentNumberStr[1].digitToInt(),
+            number = studentNumberStr.substring(2).toInt(),
+            name = studentName,
+            rawStudentNumber = studentNumberStr,
         )
     }
 
